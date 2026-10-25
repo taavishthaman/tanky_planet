@@ -85,6 +85,133 @@ window.addEventListener('resize', () => {
   if (typeof aimLineMat !== 'undefined') aimLineMat.resolution.set(window.innerWidth, window.innerHeight);
 });
 
+// ------------------------------- audio -----------------------------------
+// All sound is synthesized with the Web Audio API — no asset files, works
+// offline. The AudioContext must be resumed after a user gesture (browser
+// autoplay policy), so we resume on the first key/pointer/gamepad input.
+const audio = (() => {
+  let ctx = null;
+  let master = null;
+  let chargeOsc = null;
+  let chargeGain = null;
+
+  function ensure() {
+    if (!ctx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      ctx = new AC();
+      master = ctx.createGain();
+      master.gain.value = 0.45;
+      master.connect(ctx.destination);
+    }
+    if (ctx.state === 'suspended') ctx.resume();
+    return ctx;
+  }
+
+  function noiseBuffer(dur) {
+    const n = Math.max(1, Math.floor(ctx.sampleRate * dur));
+    const buf = ctx.createBuffer(1, n, ctx.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) data[i] = Math.random() * 2 - 1;
+    return buf;
+  }
+
+  function env(g, t0, peak, attack, decay) {
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(peak, t0 + attack);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + attack + decay);
+  }
+
+  function tone(type, f0, f1, dur, peak, t) {
+    const osc = ctx.createOscillator();
+    const g = ctx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(f0, t);
+    if (f1 !== f0) osc.frequency.exponentialRampToValueAtTime(f1, t + dur);
+    env(g, t, peak, 0.005, dur);
+    osc.connect(g); g.connect(master);
+    osc.start(t); osc.stop(t + dur + 0.05);
+  }
+
+  return {
+    resume() { try { ensure(); } catch (e) { /* no audio */ } },
+
+    fire(vol = 1) {
+      try {
+        ensure(); const t = ctx.currentTime;
+        tone('sine', 230, 55, 0.2, 0.5 * vol, t); // low thump
+        const src = ctx.createBufferSource(); src.buffer = noiseBuffer(0.2);
+        const ng = ctx.createGain(); const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass'; bp.frequency.value = 900;
+        env(ng, t, 0.3 * vol, 0.005, 0.14);
+        src.connect(bp); bp.connect(ng); ng.connect(master);
+        src.start(t); src.stop(t + 0.2);
+      } catch (e) { /* no audio */ }
+    },
+
+    explosion(vol = 1) {
+      try {
+        ensure(); const t = ctx.currentTime;
+        const src = ctx.createBufferSource(); src.buffer = noiseBuffer(0.5);
+        const g = ctx.createGain(); const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.setValueAtTime(1900, t);
+        lp.frequency.exponentialRampToValueAtTime(220, t + 0.4);
+        env(g, t, 0.7 * vol, 0.005, 0.45);
+        src.connect(lp); lp.connect(g); g.connect(master);
+        src.start(t); src.stop(t + 0.5);
+        tone('sine', 130, 42, 0.35, 0.6 * vol, t); // low boom
+      } catch (e) { /* no audio */ }
+    },
+
+    hit() { try { ensure(); tone('square', 320, 120, 0.12, 0.22, ctx.currentTime); } catch (e) { /* no audio */ } },
+
+    pickup() {
+      try {
+        ensure(); const t = ctx.currentTime;
+        [523.25, 659.25, 783.99].forEach((f, i) => tone('sine', f, f, 0.16, 0.28, t + i * 0.07));
+      } catch (e) { /* no audio */ }
+    },
+
+    end(win) {
+      try {
+        ensure(); const t = ctx.currentTime;
+        const notes = win ? [523.25, 659.25, 783.99, 1046.5] : [466.16, 392, 311.13, 233.08];
+        notes.forEach((f, i) => tone(win ? 'triangle' : 'sawtooth', f, f, 0.3, 0.32, t + i * 0.15));
+      } catch (e) { /* no audio */ }
+    },
+
+    startCharge() {
+      try {
+        ensure();
+        if (chargeOsc) return;
+        const t = ctx.currentTime;
+        chargeOsc = ctx.createOscillator();
+        chargeGain = ctx.createGain();
+        chargeOsc.type = 'triangle';
+        chargeOsc.frequency.setValueAtTime(140, t);
+        chargeGain.gain.setValueAtTime(0.0001, t);
+        chargeGain.gain.exponentialRampToValueAtTime(0.09, t + 0.05);
+        chargeOsc.connect(chargeGain); chargeGain.connect(master);
+        chargeOsc.start(t);
+      } catch (e) { /* no audio */ }
+    },
+    setChargePitch(frac) {
+      if (chargeOsc && ctx) chargeOsc.frequency.setTargetAtTime(140 + frac * 360, ctx.currentTime, 0.04);
+    },
+    stopCharge() {
+      if (!chargeOsc || !ctx) return;
+      const t = ctx.currentTime;
+      chargeGain.gain.setTargetAtTime(0.0001, t, 0.03);
+      chargeOsc.stop(t + 0.12);
+      chargeOsc = null; chargeGain = null;
+    },
+  };
+})();
+
+['keydown', 'pointerdown', 'mousedown'].forEach((ev) =>
+  window.addEventListener(ev, () => audio.resume(), { once: true })
+);
+
 // ------------------------------- skybox -----------------------------------
 
 function buildSkyTexture() {
@@ -164,6 +291,13 @@ sun.shadow.camera.bottom = -40;
 sun.shadow.camera.near = 10;
 sun.shadow.camera.far = 250;
 scene.add(sun);
+
+// Fill light from roughly the opposite side so the far hemisphere isn't lost to
+// shadow. Dimmer and cooler than the sun, and it casts no shadows (keeps a
+// single shadow caster and avoids extra cost).
+const fillLight = new THREE.DirectionalLight(0xbcd2ff, 0.7);
+fillLight.position.set(-60, -30, -45);
+scene.add(fillLight);
 
 // ------------------------------- planet texture -----------------------------------
 
@@ -495,6 +629,7 @@ function updateRepairs(dt) {
       if (player.alive && player.hp < MAX_HP && surfaceDistance(player.normal, pk.dir) < REPAIR_PICK_RADIUS) {
         player.hp = Math.min(MAX_HP, player.hp + REPAIR_HEAL);
         burstAt(pk.mesh.position, 0x6effa8, 22);
+        audio.pickup();
         pk.active = false;
         pk.respawn = REPAIR_RESPAWN;
         pk.mesh.visible = false;
@@ -589,6 +724,7 @@ class Tank {
     if (!this.alive) return;
     this.hp = Math.max(0, this.hp - amount);
     flashHit(this.mesh);
+    audio.hit();
     if (this.hp <= 0) this.alive = false;
   }
 }
@@ -712,6 +848,7 @@ function destroyBarrel(barrel) {
   if (!barrel.userData.alive) return;
   barrel.userData.alive = false;
   burstAt(barrel.position, 0xff6622, 26);
+  audio.explosion(1.1);
   planetGroup.remove(barrel);
   shakeCamera(0.35, 6);
   allTanks().forEach((t) => {
@@ -723,6 +860,7 @@ function explodeProjectile(p, hitPosition) {
   if (p.dead) return;
   p.dead = true;
   burstAt(hitPosition, 0xffaa33, 20);
+  audio.explosion(0.7);
   planetGroup.remove(p.mesh);
   planetGroup.remove(p.trail);
 }
@@ -829,6 +967,7 @@ function fireTank(tank, power) {
   const dir = tank.aimDirection();
   spawnProjectile(origin, dir.multiplyScalar(power), tank);
   spawnFlash(origin, 0xffdd88, 3.2, 0.12);
+  audio.fire(tank === player ? 1 : 0.5);
   if (tank === player) shakeCamera(0.15, 3);
 }
 
@@ -970,6 +1109,7 @@ let playerFireCooldown = 0;
 let gameOver = false;
 let gameReady = false;
 let triggerHeld = false; // right trigger on a gamepad
+let wasCharging = false; // for charge-whine audio edges
 
 // Charging is driven by either SPACE or the gamepad right trigger.
 function isCharging() {
@@ -1037,6 +1177,7 @@ function pollGamepad() {
   // Right trigger is button 7 in the standard mapping (analog .value).
   const rt = gp.buttons[7];
   triggerHeld = !!rt && (rt.pressed || rt.value > 0.35);
+  if (triggerHeld || padMove || padTurn) audio.resume(); // unlock audio on pad input
   if (triggerHeld && !prevTrigger) charge = 0;              // start a fresh charge
   if (!triggerHeld && prevTrigger) tryFirePlayer();         // release = fire
 }
@@ -1196,6 +1337,8 @@ function checkGameOver() {
   const enemiesAlive = enemies.some((e) => e.alive);
   if (!player.alive || !enemiesAlive) {
     gameOver = true;
+    audio.stopCharge();
+    audio.end(player.alive);
     overlayTitle.textContent = player.alive ? 'VICTORY' : 'DEFEATED';
     overlayTitle.style.color = player.alive ? '#4ee281' : '#ff5f5f';
     overlay.classList.add('show');
@@ -1289,6 +1432,13 @@ function animate() {
     }
     enemies.forEach((enemy) => updateAI(enemy, dt));
   }
+
+  // rising charge whine while powering up a shot
+  const chargingNow = isCharging() && player.alive && !gameOver;
+  if (chargingNow && !wasCharging) audio.startCharge();
+  else if (!chargingNow && wasCharging) audio.stopCharge();
+  if (chargingNow) audio.setChargePitch(charge / (MAX_POWER - MIN_POWER));
+  wasCharging = chargingNow;
 
   enemies.forEach((enemy) => { if (enemy.mixer) enemy.mixer.update(dt); });
 

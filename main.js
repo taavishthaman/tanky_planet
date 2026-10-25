@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
 // ---------------------------------------------------------------------------
 // Tanky Planet — tiny gravity-well planet, tanks duke it out on the surface.
@@ -47,9 +46,11 @@ const REPAIR_PICK_RADIUS = 2.2;
 const REPAIR_RESPAWN = 9;
 const REPAIR_COUNT = 2;
 
+// Per-enemy colour tints (multiplied over the shared player tank model).
+const ENEMY_TINTS = [0xff5a5a, 0xc26bff, 0xff9a3c, 0x5ad1ff, 0x6bd97a];
+
 const ASSET_PATHS = {
   tankPlayer: 'assets/models/tank_player.glb',
-  tankEnemy: 'assets/models/tank_enemy.glb',
   barrel: 'assets/models/barrel.glb',
   treePine: 'assets/models/tree_pine.glb',
   treeRound: 'assets/models/tree_round.glb',
@@ -269,71 +270,6 @@ const planetMesh = new THREE.Mesh(
 planetMesh.receiveShadow = true;
 planetGroup.add(planetMesh);
 
-// Atmosphere glow: a fresnel rim on a slightly larger back-facing shell, drawn
-// additively so it reads as a soft halo hugging the limb and fading into space —
-// instead of a flat constant-opacity band that piles up near the horizon.
-const atmosphere = new THREE.Mesh(
-  new THREE.SphereGeometry(PLANET_RADIUS + 1.8, 64, 64),
-  new THREE.ShaderMaterial({
-    uniforms: {
-      glowColor: { value: new THREE.Color(0x6db6ff) },
-      coef: { value: 0.42 },
-      power: { value: 6.5 },
-      strength: { value: 0.75 },
-    },
-    vertexShader: `
-      varying vec3 vNormalView;
-      void main() {
-        vNormalView = normalize(normalMatrix * normal);
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }`,
-    fragmentShader: `
-      uniform vec3 glowColor;
-      uniform float coef;
-      uniform float power;
-      uniform float strength;
-      varying vec3 vNormalView;
-      void main() {
-        float intensity = pow(clamp(coef - dot(vNormalView, vec3(0.0, 0.0, 1.0)), 0.0, 1.0), power);
-        gl_FragColor = vec4(glowColor, 1.0) * intensity * strength;
-      }`,
-    transparent: true,
-    blending: THREE.AdditiveBlending,
-    side: THREE.BackSide,
-    depthWrite: false,
-  })
-);
-planetGroup.add(atmosphere);
-
-function buildCloudTexture() {
-  const w = 512, h = 256;
-  const c = document.createElement('canvas');
-  c.width = w; c.height = h;
-  const ctx = c.getContext('2d');
-  ctx.clearRect(0, 0, w, h);
-  for (let i = 0; i < 70; i++) {
-    const cx = Math.random() * w;
-    const cy = Math.random() * h;
-    const r = 14 + Math.random() * 30;
-    const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, r);
-    grad.addColorStop(0, 'rgba(255,255,255,0.55)');
-    grad.addColorStop(1, 'rgba(255,255,255,0)');
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = THREE.RepeatWrapping;
-  return tex;
-}
-
-const cloudMesh = new THREE.Mesh(
-  new THREE.SphereGeometry(PLANET_RADIUS + 2.6, 48, 48),
-  new THREE.MeshBasicMaterial({ map: buildCloudTexture(), transparent: true, depthWrite: false })
-);
-planetGroup.add(cloudMesh);
-
 // ------------------------------- surface helpers -----------------------------------
 
 function randomPointOnSphere() {
@@ -405,9 +341,8 @@ function buildTemplate(rawScene, targetSize, correctionY = 0) {
 }
 
 async function loadAssets() {
-  const [playerGltf, enemyGltf, barrelGltf, pineGltf, roundGltf, oakGltf] = await Promise.all([
+  const [playerGltf, barrelGltf, pineGltf, roundGltf, oakGltf] = await Promise.all([
     loadGLTF(ASSET_PATHS.tankPlayer),
-    loadGLTF(ASSET_PATHS.tankEnemy),
     loadGLTF(ASSET_PATHS.barrel),
     loadGLTF(ASSET_PATHS.treePine),
     loadGLTF(ASSET_PATHS.treeRound),
@@ -415,8 +350,9 @@ async function loadAssets() {
   ]);
 
   return {
+    // Enemies reuse the player's tank model (just recolored) so the fleet looks
+    // consistent — see tintTank() at the enemy spawn in init().
     tankPlayer: buildTemplate(playerGltf.scene, TANK_MODEL_SIZE),
-    tankEnemy: { template: buildTemplate(enemyGltf.scene, TANK_MODEL_SIZE), clips: enemyGltf.animations },
     barrel: buildTemplate(barrelGltf.scene, BARREL_MODEL_SIZE),
     trees: [
       buildTemplate(pineGltf.scene, TREE_MODEL_SIZE),
@@ -424,6 +360,23 @@ async function loadAssets() {
       buildTemplate(oakGltf.scene, TREE_MODEL_SIZE * 1.1),
     ],
   };
+}
+
+// Recolor a cloned tank by multiplying each material's color by a tint. Materials
+// are shared after .clone(true), so we clone them first to avoid tinting the
+// player and the other enemies too.
+function tintTank(root, tint) {
+  const tintColor = new THREE.Color(tint);
+  root.traverse((c) => {
+    if (!c.isMesh || !c.material) return;
+    const mats = Array.isArray(c.material) ? c.material : [c.material];
+    const recolored = mats.map((m) => {
+      const nm = m.clone();
+      if (nm.color) nm.color.multiply(tintColor);
+      return nm;
+    });
+    c.material = Array.isArray(c.material) ? recolored : recolored[0];
+  });
 }
 
 // ------------------------------- scenery: trees + barrels -----------------------------------
@@ -1189,16 +1142,9 @@ async function init() {
 
   enemies = [];
   for (let i = 0; i < ENEMY_COUNT; i++) {
-    const cloned = cloneSkinned(assets.tankEnemy.template);
-    const mixer = new THREE.AnimationMixer(cloned);
-    const clips = {};
-    assets.tankEnemy.clips.forEach((clip) => {
-      if (/Forward/i.test(clip.name)) clips.forward = clip;
-      else if (/Backward/i.test(clip.name)) clips.backward = clip;
-      else if (/TurningLeft/i.test(clip.name)) clips.left = clip;
-      else if (/TurningRight/i.test(clip.name)) clips.right = clip;
-    });
-    enemies.push(new Tank(cloned, false, mixer, clips));
+    const cloned = assets.tankPlayer.clone(true);
+    tintTank(cloned, ENEMY_TINTS[i % ENEMY_TINTS.length]);
+    enemies.push(new Tank(cloned, false));
   }
 
   const starts = pickStartPoints();
@@ -1255,8 +1201,6 @@ function animate() {
 
   enemies.forEach((enemy) => { if (enemy.mixer) enemy.mixer.update(dt); });
 
-  cloudMesh.rotation.y += dt * 0.02;
-
   updateProjectiles(dt);
   updateBursts(dt);
   updateFlashes(dt);
@@ -1270,4 +1214,3 @@ function animate() {
 }
 
 init();
-window.__perf = { scene, renderer, projectiles, transientFlashes };

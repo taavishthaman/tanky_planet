@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { Line2 } from 'three/addons/lines/Line2.js';
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js';
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 
 // ---------------------------------------------------------------------------
 // Tanky Planet — tiny gravity-well planet, tanks duke it out on the surface.
@@ -8,41 +11,47 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 // around the world, same spirit as the original napkin sketch.
 // ---------------------------------------------------------------------------
 
-const PLANET_RADIUS = 26;
-// Projectiles fly ~1.7x faster than before. Scaling launch speed by k and
-// gravity by k^2 keeps the arc *shape* (and ranges) identical while cutting
-// the flight time — so shots feel snappy instead of floaty.
-const SPEED_SCALE = 1.7;
-const GRAVITY = 9.5 * SPEED_SCALE * SPEED_SCALE;
+// Small world so a shell can lap the whole globe like a satellite and come
+// back around to strike from the far side.
+const PLANET_RADIUS = 19;
+// Gravity is tuned so the *circular orbit* speed (v = sqrt(gravity * r)) at
+// muzzle altitude lands around the middle of the power bar — so a mid-charge
+// shot fired flat becomes a stable satellite. Weaker = sub-orbital (dips and
+// hits ground = short/direct shots); stronger = a high ellipse that arcs out
+// and comes back down (long bombardment). The orbit sweet-spot is marked on
+// the power bar.
+const GRAVITY = 90;
 const TANK_GROUND_CLEARANCE = 0.05;
-const TANK_HIT_RADIUS = 2.1;
-const TANK_BODY_RADIUS = 1.2;
-const TANK_MODEL_SIZE = 3.1;
-const TREE_MODEL_SIZE = 2.3;
-const TREE_COLLIDER_RADIUS = 0.95;
-const BARREL_MODEL_SIZE = 1.15;
-const BARREL_COLLIDER_RADIUS = 0.85;
-const MOVE_SPEED = 9.5;
+const TANK_HIT_RADIUS = 1.6;
+const TANK_BODY_RADIUS = 0.92;
+const TANK_MODEL_SIZE = 2.3;
+const TREE_MODEL_SIZE = 1.7;
+const TREE_COLLIDER_RADIUS = 0.72;
+const BARREL_MODEL_SIZE = 0.9;
+const BARREL_COLLIDER_RADIUS = 0.65;
+const MOVE_SPEED = 7.5;
 const TURN_SPEED = 2.5;
-const MIN_POWER = 13 * SPEED_SCALE;
-const MAX_POWER = 38 * SPEED_SCALE;
+const MIN_POWER = 22;
+const MAX_POWER = 65;
 const CHARGE_RATE = (MAX_POWER - MIN_POWER) / 1.1;
-const SPLASH_RADIUS = 4.5;
+const SPLASH_RADIUS = 3.5;
 const SPLASH_DAMAGE = 32;
 const DIRECT_DAMAGE = 24;
 const MAX_HP = 100;
 const ENEMY_COUNT = 3;
-const MUZZLE_HEIGHT = 0.95;
-const MUZZLE_FORWARD = 1.5;
+const MUZZLE_HEIGHT = 1.0;
+const MUZZLE_FORWARD = 1.2;
 const FIRE_COOLDOWN = 0.35; // min seconds between the player's shots
+const PROJECTILE_LIFETIME = 25; // long enough to lap the planet several times
 
-// Terrain: a smooth sum-of-bumps height field gives rolling hills and craters.
-const TERRAIN_AMP = 1.35;
-const TERRAIN_BUMPS = 15;
+// Terrain: gentle hills only, so an orbiting shell clears them instead of
+// smacking into the first ridge.
+const TERRAIN_AMP = 0.5;
+const TERRAIN_BUMPS = 10;
 
 // Repair pickups
 const REPAIR_HEAL = 32;
-const REPAIR_PICK_RADIUS = 2.2;
+const REPAIR_PICK_RADIUS = 1.8;
 const REPAIR_RESPAWN = 9;
 const REPAIR_COUNT = 2;
 
@@ -60,7 +69,7 @@ const ASSET_PATHS = {
 // ------------------------------- renderer -----------------------------------
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 2000);
+const camera = new THREE.PerspectiveCamera(68, window.innerWidth / window.innerHeight, 0.1, 2000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -72,6 +81,7 @@ window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if (typeof aimLineMat !== 'undefined') aimLineMat.resolution.set(window.innerWidth, window.innerHeight);
 });
 
 // ------------------------------- skybox -----------------------------------
@@ -741,7 +751,7 @@ function updateProjectiles(dt) {
 
     const dist = p.mesh.position.length();
 
-    if (p.age > 14 || dist > PLANET_RADIUS * 6) {
+    if (p.age > PROJECTILE_LIFETIME || dist > PLANET_RADIUS * 8) {
       explodeProjectile(p, p.mesh.position);
       continue;
     }
@@ -823,16 +833,27 @@ function fireTank(tank, power) {
 
 // ------------------------------- aim assist -----------------------------------
 
-const AIM_MAX_POINTS = 140;
-const aimGeo = new THREE.BufferGeometry();
-aimGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(AIM_MAX_POINTS * 3), 3));
-const aimLine = new THREE.Line(aimGeo, new THREE.LineDashedMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.55, dashSize: 0.6, gapSize: 0.45 }));
+const AIM_MAX_POINTS = 260; // enough to trace a full orbit (and then some)
+const AIM_LINE_LIFT = 0.45; // float the path just above the surface so it reads
+// A fat (pixel-width) dashed line reads far better than a 1px world line that
+// hides against the planet. Line2 gives a real, resolution-aware thickness.
+const aimLineMat = new LineMaterial({
+  color: 0x9fe8ff,
+  linewidth: 3.5, // in screen pixels
+  transparent: true,
+  opacity: 0.95,
+  depthTest: true,
+});
+aimLineMat.resolution.set(window.innerWidth, window.innerHeight);
+const aimGeo = new LineGeometry();
+const aimLine = new Line2(aimGeo, aimLineMat);
 aimLine.visible = false;
+aimLine.frustumCulled = false;
 scene.add(aimLine);
 
 const impactRing = new THREE.Mesh(
-  new THREE.TorusGeometry(1.0, 0.12, 8, 28),
-  new THREE.MeshBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.8 })
+  new THREE.TorusGeometry(0.85, 0.14, 10, 32),
+  new THREE.MeshBasicMaterial({ color: 0x9fe8ff, transparent: true, opacity: 0.85 })
 );
 impactRing.visible = false;
 scene.add(impactRing);
@@ -841,7 +862,7 @@ scene.add(impactRing);
 function predictTrajectory(origin, dir, power) {
   const pos = origin.clone();
   const vel = dir.clone().multiplyScalar(power);
-  const step = 1 / 60;
+  const step = 1 / 60; // match the game's integration so the path is accurate
   const points = [pos.clone()];
   let impact = null;
   for (let i = 0; i < AIM_MAX_POINTS - 1; i++) {
@@ -850,9 +871,18 @@ function predictTrajectory(origin, dir, power) {
     pos.add(vel.clone().multiplyScalar(step));
     points.push(pos.clone());
     const pd = pos.clone().normalize();
-    if (pos.length() - surfaceRadius(pd) <= 0.15) { impact = pos.clone(); break; }
+    // ignore the launch point itself so the orbit can close back onto the muzzle
+    if (i > 4 && pos.length() - surfaceRadius(pd) <= 0.15) { impact = pos.clone(); break; }
   }
   return { points, impact };
+}
+
+// Launch speed that produces a circular orbit at the player's current muzzle
+// altitude: centripetal accel v^2/r must equal the (constant) gravity, so
+// v = sqrt(gravity * r). Used to mark the orbit sweet-spot on the power bar.
+function orbitalPower() {
+  const r = surfaceRadius(player.normal) + TANK_GROUND_CLEARANCE + MUZZLE_HEIGHT;
+  return Math.sqrt(GRAVITY * r);
 }
 
 function updateAim() {
@@ -863,23 +893,26 @@ function updateAim() {
   }
   const power = MIN_POWER + charge;
   const { points, impact } = predictTrajectory(player.muzzleWorldPosition(), player.aimDirection(), power);
+  const active = isCharging();
 
-  const posAttr = aimGeo.attributes.position;
-  for (let i = 0; i < AIM_MAX_POINTS; i++) {
-    const pt = points[Math.min(i, points.length - 1)];
-    posAttr.setXYZ(i, pt.x, pt.y, pt.z);
+  // Float each sample a little off the surface so the path is clearly visible.
+  const flat = new Array(points.length * 3);
+  for (let i = 0; i < points.length; i++) {
+    const pt = points[i];
+    const lift = 1 + AIM_LINE_LIFT / pt.length();
+    flat[i * 3] = pt.x * lift;
+    flat[i * 3 + 1] = pt.y * lift;
+    flat[i * 3 + 2] = pt.z * lift;
   }
-  posAttr.needsUpdate = true;
-  aimGeo.setDrawRange(0, points.length);
-  aimLine.computeLineDistances();
+  aimGeo.setPositions(flat);
   aimLine.visible = true;
-  // brighter while actively charging
-  aimLine.material.opacity = keys.space ? 0.85 : 0.4;
+  aimLineMat.opacity = active ? 0.95 : 0.5;
+  aimLineMat.linewidth = active ? 4 : 2.5;
 
   if (impact) {
     impactRing.position.copy(impact);
     impactRing.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), impact.clone().normalize());
-    impactRing.material.opacity = keys.space ? 0.9 : 0.5;
+    impactRing.material.opacity = active ? 0.9 : 0.5;
     impactRing.visible = true;
   } else {
     impactRing.visible = false;
@@ -931,6 +964,21 @@ let charge = 0;
 let playerFireCooldown = 0;
 let gameOver = false;
 let gameReady = false;
+let triggerHeld = false; // right trigger on a gamepad
+
+// Charging is driven by either SPACE or the gamepad right trigger.
+function isCharging() {
+  return keys.space || triggerHeld;
+}
+
+// Release the charged shot (shared by keyboard, gamepad, and anything else).
+function tryFirePlayer() {
+  if (!gameOver && player && player.alive && playerFireCooldown <= 0) {
+    fireTank(player, MIN_POWER + charge);
+    playerFireCooldown = FIRE_COOLDOWN;
+  }
+  charge = 0;
+}
 
 window.addEventListener('keydown', (e) => {
   if (gameOver || !gameReady) return;
@@ -949,20 +997,47 @@ window.addEventListener('keyup', (e) => {
     case 'KeyA': keys.a = false; break;
     case 'KeyD': keys.d = false; break;
     case 'Space':
-      if (keys.space && !gameOver && player.alive && playerFireCooldown <= 0) {
-        const power = MIN_POWER + charge;
-        fireTank(player, power);
-        playerFireCooldown = FIRE_COOLDOWN;
-      }
+      if (keys.space) tryFirePlayer();
       keys.space = false;
-      charge = 0;
       e.preventDefault();
       break;
   }
 });
 
+// ------------------------------- gamepad -----------------------------------
+
+// Left stick drives (push up = forward, left/right = turn); right trigger
+// charges while held and fires on release — same charge model as SPACE.
+const GAMEPAD_DEADZONE = 0.22;
+let padMove = 0;
+let padTurn = 0;
+
+function pollGamepad() {
+  padMove = 0;
+  padTurn = 0;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null;
+  for (const p of pads) { if (p && p.connected) { gp = p; break; } }
+
+  const prevTrigger = triggerHeld;
+  if (!gp) { triggerHeld = false; return; }
+
+  const lx = gp.axes[0] || 0;
+  const ly = gp.axes[1] || 0;
+  if (Math.abs(ly) > GAMEPAD_DEADZONE) padMove = -ly;       // up = forward
+  if (Math.abs(lx) > GAMEPAD_DEADZONE) padTurn = -lx;       // right = turn right
+  if (gameOver || !gameReady) { triggerHeld = false; return; }
+
+  // Right trigger is button 7 in the standard mapping (analog .value).
+  const rt = gp.buttons[7];
+  triggerHeld = !!rt && (rt.pressed || rt.value > 0.35);
+  if (triggerHeld && !prevTrigger) charge = 0;              // start a fresh charge
+  if (!triggerHeld && prevTrigger) tryFirePlayer();         // release = fire
+}
+
 const powerWrap = document.getElementById('powerWrap');
 const powerFill = document.getElementById('powerFill');
+const orbitMark = document.getElementById('orbitMark');
 
 // ------------------------------- enemy AI -----------------------------------
 
@@ -1002,8 +1077,8 @@ function updateAI(enemy, dt) {
 
 // ------------------------------- camera -----------------------------------
 
-const CAM_DISTANCE = 12.5;
-const CAM_HEIGHT = 8;
+const CAM_DISTANCE = 9;
+const CAM_HEIGHT = 42;
 const camPos = new THREE.Vector3();
 const camTarget = new THREE.Vector3();
 let shakeTime = 0;
@@ -1031,7 +1106,8 @@ function updateCamera(dt) {
 
   camera.position.copy(camPos).add(shakeOffset);
   camera.up.copy(t.normal);
-  const lookAt = t.position.clone().add(t.normal.clone().multiplyScalar(1.1)).add(t.forward.clone().multiplyScalar(3));
+  // Bias the look-ahead toward the firing lane so the aim arc lies across the disc.
+  const lookAt = t.position.clone().add(t.forward.clone().multiplyScalar(6));
   camTarget.lerp(lookAt, Math.min(1, dt * 8));
   camera.lookAt(camTarget);
 }
@@ -1095,9 +1171,11 @@ function updateHUD() {
     const el = enemyBarsEl.querySelector(`[data-enemy="${i}"]`);
     if (el) el.style.width = `${Math.max(0, (enemy.hp / MAX_HP) * 100)}%`;
   });
-  if (keys.space) {
+  if (isCharging()) {
     powerWrap.classList.add('show');
     powerFill.style.width = `${(charge / (MAX_POWER - MIN_POWER)) * 100}%`;
+    const orbitFrac = THREE.MathUtils.clamp((orbitalPower() - MIN_POWER) / (MAX_POWER - MIN_POWER), 0, 1);
+    orbitMark.style.left = `${orbitFrac * 100}%`;
   } else {
     powerWrap.classList.remove('show');
   }
@@ -1160,9 +1238,9 @@ async function init() {
     () => assets.trees[2].clone(true),
   ];
   const avoid = starts;
-  scatterScenery(16, () => treeFactories[Math.floor(Math.random() * treeFactories.length)](),
+  scatterScenery(9, () => treeFactories[Math.floor(Math.random() * treeFactories.length)](),
     { isBarrel: false, colliderRadius: TREE_COLLIDER_RADIUS }, avoid);
-  scatterScenery(9, () => {
+  scatterScenery(5, () => {
     const b = assets.barrel.clone(true);
     b.userData.isBarrel = true;
     b.userData.alive = true;
@@ -1184,6 +1262,7 @@ function animate() {
   const dt = Math.min(clock.getDelta(), 0.05);
 
   if (playerFireCooldown > 0) playerFireCooldown -= dt;
+  pollGamepad();
 
   if (!gameOver) {
     if (player.alive) {
@@ -1192,9 +1271,12 @@ function animate() {
       if (keys.s) { player.move(-1, dt); moving = true; }
       if (keys.a) { player.turn(1, dt); moving = true; }
       if (keys.d) { player.turn(-1, dt); moving = true; }
+      // gamepad analog stick (continuous): speed scales with stick deflection
+      if (padMove !== 0) { player.move(padMove, dt); moving = true; }
+      if (padTurn !== 0) { player.turn(padTurn, dt); moving = true; }
       if (!moving) player.stopClip();
       player.updateMesh();
-      if (keys.space) charge = Math.min(MAX_POWER - MIN_POWER, charge + CHARGE_RATE * dt);
+      if (isCharging()) charge = Math.min(MAX_POWER - MIN_POWER, charge + CHARGE_RATE * dt);
     }
     enemies.forEach((enemy) => updateAI(enemy, dt));
   }

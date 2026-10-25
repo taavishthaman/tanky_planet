@@ -40,7 +40,9 @@
 
   #powerWrap { position: absolute; bottom: 92px; left: 50%; transform: translateX(-50%); width: 280px; padding: 6px 10px; opacity: 0; transition: opacity .15s; }
   #powerWrap.show { opacity: 1; }
-  #powerWrap .bar3 { height: 18px; }
+  #powerWrap .bar3 { height: 18px; position: relative; }
+  #orbitMark { position: absolute; top: -3px; bottom: -3px; width: 3px; margin-left: -1.5px; background: #9fe8ff; box-shadow: 0 0 6px #9fe8ff; border-radius: 2px; pointer-events: none; }
+  #orbitMark span { position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); margin-bottom: 3px; font-size: 9px; font-weight: 700; letter-spacing: 1px; color: #9fe8ff; text-shadow: 0 1px 2px rgba(0,0,0,.8); }
 
   #instructions { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); width: 90vw; max-width: 480px; font-size: 11px; text-align: center; padding: 8px 16px; text-shadow: 0 1px 2px rgba(0,0,0,.6); letter-spacing: .5px; }
   #title { position: absolute; top: 12px; left: 50%; transform: translateX(-50%); font-size: 20px; font-weight: 900; letter-spacing: 5px; text-shadow: 0 2px 10px rgba(60,180,255,.6), 0 2px 6px rgba(0,0,0,.8); color: #cdeeff; }
@@ -91,13 +93,14 @@
     <div class="bar3 shadow">
       <div class="cap"></div><div class="mid"></div><div class="cap right"></div>
       <div class="bar-fill-track"><div class="bar-fill yellow" id="powerFill"></div></div>
+      <div id="orbitMark"><span>ORBIT</span></div>
     </div>
   </div>
 
   <div id="radar"><div class="ring"></div><div class="self"></div></div>
 
   <div id="crosshair"></div>
-  <div id="instructions" class="panel">W/S move &nbsp;·&nbsp; A/D turn &nbsp;·&nbsp; hold SPACE to charge &amp; aim, release to fire &nbsp;·&nbsp; grab <span style="color:#6effa8">medkits</span> to repair</div>
+  <div id="instructions" class="panel">W/S move &nbsp;·&nbsp; A/D turn &nbsp;·&nbsp; hold SPACE to charge &amp; aim, release to fire &nbsp;·&nbsp; <span style="color:#9fe8ff">🎮 stick + right trigger</span> &nbsp;·&nbsp; grab <span style="color:#6effa8">medkits</span> to repair</div>
 </div>
 <div id="loading" class="show">
   <div class="spinner"></div>

@@ -39,7 +39,7 @@ const SPLASH_RADIUS = 3.5;
 const SPLASH_DAMAGE = 32;
 const DIRECT_DAMAGE = 24;
 const MAX_HP = 100;
-const ENEMY_COUNT = 3;
+const ENEMY_COUNT = 5;
 const MUZZLE_HEIGHT = 1.0;
 const MUZZLE_FORWARD = 1.2;
 const FIRE_COOLDOWN = 0.35; // min seconds between the player's shots
@@ -121,15 +121,38 @@ const audio = (() => {
     g.gain.exponentialRampToValueAtTime(0.0001, t0 + attack + decay);
   }
 
-  function tone(type, f0, f1, dur, peak, t) {
+  function tone(type, f0, f1, dur, peak, t, dest) {
     const osc = ctx.createOscillator();
     const g = ctx.createGain();
     osc.type = type;
     osc.frequency.setValueAtTime(f0, t);
     if (f1 !== f0) osc.frequency.exponentialRampToValueAtTime(f1, t + dur);
     env(g, t, peak, 0.005, dur);
-    osc.connect(g); g.connect(master);
+    osc.connect(g); g.connect(dest || master);
     osc.start(t); osc.stop(t + dur + 0.05);
+  }
+
+  // ---- looping background music (a slow, spacey chord progression) ----
+  let musicGain = null;
+  let musicTimer = null;
+  let musicPlaying = false;
+  // Am – F – C – G, as [bass, ...triad] frequencies (Hz)
+  const MUSIC_PROG = [
+    [110.00, 220.00, 261.63, 329.63],
+    [87.31, 174.61, 220.00, 261.63],
+    [130.81, 261.63, 329.63, 392.00],
+    [98.00, 196.00, 246.94, 293.66],
+  ];
+  const CHORD_DUR = 2.2;
+  const ARP = CHORD_DUR / 4;
+
+  function scheduleChord(startT, chord) {
+    tone('sine', chord[0], chord[0], CHORD_DUR * 0.96, 0.5, startT, musicGain);       // bass
+    tone('sine', chord[0] * 2, chord[0] * 2, CHORD_DUR * 0.9, 0.18, startT, musicGain); // soft pad
+    for (let i = 0; i < 4; i++) {                                                       // arpeggio
+      const f = chord[1 + (i % 3)];
+      tone('triangle', f, f, ARP * 0.85, 0.22, startT + i * ARP, musicGain);
+    }
   }
 
   return {
@@ -205,6 +228,33 @@ const audio = (() => {
       chargeOsc.stop(t + 0.12);
       chargeOsc = null; chargeGain = null;
     },
+
+    startMusic() {
+      try {
+        ensure();
+        if (musicPlaying) return;
+        musicPlaying = true;
+        musicGain = ctx.createGain();
+        musicGain.gain.value = 0.13; // quiet bed under the SFX
+        musicGain.connect(master);
+        let nextTime = ctx.currentTime + 0.15;
+        let idx = 0;
+        const tick = () => {
+          if (!musicPlaying) return;
+          // schedule a little ahead so it never stutters
+          while (nextTime < ctx.currentTime + 1.0) {
+            scheduleChord(nextTime, MUSIC_PROG[idx % MUSIC_PROG.length]);
+            idx++;
+            nextTime += CHORD_DUR;
+          }
+          musicTimer = setTimeout(tick, 250);
+        };
+        tick();
+      } catch (e) { /* no audio */ }
+    },
+    setMusicVolume(v) {
+      if (musicGain && ctx) musicGain.gain.setTargetAtTime(v, ctx.currentTime, 0.3);
+    },
   };
 })();
 
@@ -276,6 +326,44 @@ function buildStarfield() {
 }
 buildStarfield();
 
+// ------------------------------- background planets -----------------------------------
+
+// Distant decorative worlds scattered in the sky. They catch the sun so they
+// show a lit crescent, and one has a ring. Far enough to stay in the backdrop.
+function buildBackgroundPlanets() {
+  const defs = [
+    { r: 90, dist: 560, color: 0xd98a52, dir: [-1.1, 0.5, -0.7] },               // warm orange
+    { r: 150, dist: 760, color: 0xcaa96a, dir: [1.0, -0.25, -1.1], ring: true }, // ringed gas giant
+    { r: 60, dist: 500, color: 0x9fc4df, dir: [0.5, 1.0, -0.5] },                // icy blue moon
+    { r: 80, dist: 640, color: 0xb0564a, dir: [-0.7, -0.9, -0.4] },              // red planet
+    { r: 120, dist: 760, color: 0x7b85bd, dir: [1.2, 0.7, 0.4] },                // violet-grey
+    { r: 70, dist: 620, color: 0x5fa88a, dir: [-1.2, -0.3, 0.9] },               // teal world
+    { r: 100, dist: 720, color: 0xcf7f6a, dir: [0.3, -1.1, 0.8] },               // rust giant
+    { r: 50, dist: 540, color: 0xcac2d8, dir: [0.9, 0.2, 1.1] },                 // pale moon
+  ];
+  for (const d of defs) {
+    const dir = new THREE.Vector3(...d.dir).normalize();
+    const mesh = new THREE.Mesh(
+      new THREE.SphereGeometry(d.r, 32, 24),
+      new THREE.MeshStandardMaterial({
+        color: d.color, roughness: 1, metalness: 0,
+        emissive: new THREE.Color(d.color).multiplyScalar(0.1),
+      })
+    );
+    mesh.position.copy(dir.multiplyScalar(d.dist));
+    scene.add(mesh);
+    if (d.ring) {
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(d.r * 1.4, d.r * 2.15, 64),
+        new THREE.MeshBasicMaterial({ color: 0xe0d2a8, side: THREE.DoubleSide, transparent: true, opacity: 0.45 })
+      );
+      ring.rotation.set(Math.PI * 0.42, 0.35, 0);
+      mesh.add(ring);
+    }
+  }
+}
+buildBackgroundPlanets();
+
 // ------------------------------- lighting -----------------------------------
 
 scene.add(new THREE.AmbientLight(0x9fb4e0, 1.05));
@@ -302,56 +390,100 @@ scene.add(fillLight);
 // ------------------------------- planet texture -----------------------------------
 
 function buildPlanetTexture() {
-  const w = 1024, h = 512;
+  const w = 2048, h = 1024;
   const c = document.createElement('canvas');
   c.width = w; c.height = h;
   const ctx = c.getContext('2d');
+
+  // --- ocean ---
   const grad = ctx.createLinearGradient(0, 0, 0, h);
-  grad.addColorStop(0, '#2aa7e8');
-  grad.addColorStop(0.5, '#1f8fd8');
-  grad.addColorStop(1, '#176fb0');
+  grad.addColorStop(0, '#15567f');
+  grad.addColorStop(0.5, '#1f82c4');
+  grad.addColorStop(1, '#15567f');
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, w, h);
+  // faint ocean mottling for texture
+  for (let i = 0; i < 2600; i++) {
+    ctx.fillStyle = `rgba(255,255,255,${Math.random() * 0.03})`;
+    ctx.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+  }
 
-  function blob(cx, cy, r) {
-    ctx.fillStyle = `hsl(${95 + Math.random() * 30}, 45%, ${32 + Math.random() * 14}%)`;
-    ctx.beginPath();
-    const pts = 10 + Math.floor(Math.random() * 5);
-    for (let i = 0; i <= pts; i++) {
-      const a = (i / pts) * Math.PI * 2;
-      const rr = r * (0.7 + Math.random() * 0.6);
-      const x = cx + Math.cos(a) * rr;
-      const y = cy + Math.sin(a) * rr * 0.6;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  // Draw one landmass: a jagged shape with a sand coastline, grass, forests
+  // and the odd mountain range — layered so coastlines read crisply.
+  function drawLand(cx, cy, baseR) {
+    const n = 22 + Math.floor(Math.random() * 12);
+    const radii = [];
+    for (let i = 0; i <= n; i++) radii.push(baseR * (0.58 + Math.random() * 0.55));
+    radii[n] = radii[0];
+    const pathAt = (scale) => {
+      ctx.beginPath();
+      for (let i = 0; i <= n; i++) {
+        const a = (i / n) * Math.PI * 2;
+        const rr = radii[i] * scale;
+        const x = cx + Math.cos(a) * rr;
+        const y = cy + Math.sin(a) * rr * 0.72; // squash for the sphere's latitude stretch
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+    };
+
+    ctx.save();
+    ctx.filter = 'blur(1.5px)';
+    ctx.fillStyle = '#dcc488'; // sand coastline
+    pathAt(1.12); ctx.fill();
+    ctx.fillStyle = `hsl(${92 + Math.random() * 26}, 44%, ${40 + Math.random() * 8}%)`; // grass
+    pathAt(1.0); ctx.fill();
+    ctx.restore();
+
+    // interior detail, clipped to the landmass
+    ctx.save();
+    pathAt(0.98); ctx.clip();
+    ctx.filter = 'blur(3px)';
+    for (let f = 0; f < 7; f++) { // darker forest patches
+      ctx.fillStyle = `hsla(${104 + Math.random() * 24}, 52%, ${22 + Math.random() * 8}%, 0.85)`;
+      ctx.beginPath();
+      ctx.ellipse(cx + (Math.random() - 0.5) * baseR * 1.3, cy + (Math.random() - 0.5) * baseR,
+        baseR * (0.18 + Math.random() * 0.28), baseR * (0.14 + Math.random() * 0.2), Math.random() * 6, 0, Math.PI * 2);
+      ctx.fill();
     }
-    ctx.closePath();
-    ctx.fill();
+    if (Math.random() < 0.7) { // mountain range
+      for (let m = 0; m < 4; m++) {
+        ctx.fillStyle = `hsla(32, 16%, ${44 + Math.random() * 16}%, 0.75)`;
+        ctx.beginPath();
+        ctx.ellipse(cx + (Math.random() - 0.5) * baseR, cy + (Math.random() - 0.5) * baseR * 0.6,
+          baseR * 0.14, baseR * 0.1, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
   }
-  ctx.filter = 'blur(7px)';
-  for (let i = 0; i < 9; i++) {
-    const cx = Math.random() * w;
-    const cy = 60 + Math.random() * (h - 120);
-    const r = 40 + Math.random() * 70;
-    blob(cx, cy, r);
-    blob(cx - w, cy, r);
-    blob(cx + w, cy, r);
-  }
-  ctx.filter = 'none';
 
-  const capTop = ctx.createLinearGradient(0, 0, 0, 22);
-  capTop.addColorStop(0, 'rgba(255,255,255,0.95)');
-  capTop.addColorStop(1, 'rgba(255,255,255,0)');
+  // scatter continents (mirrored left/right so the UV seam is hidden)
+  for (let i = 0; i < 11; i++) {
+    const cx = Math.random() * w;
+    const cy = h * 0.18 + Math.random() * h * 0.64;
+    const r = w * 0.035 + Math.random() * w * 0.055;
+    drawLand(cx, cy, r);
+    drawLand(cx - w, cy, r);
+    drawLand(cx + w, cy, r);
+  }
+
+  // --- ice caps ---
+  const capTop = ctx.createLinearGradient(0, 0, 0, 46);
+  capTop.addColorStop(0, 'rgba(235,245,255,0.97)');
+  capTop.addColorStop(1, 'rgba(235,245,255,0)');
   ctx.fillStyle = capTop;
-  ctx.fillRect(0, 0, w, 22);
-  const capBottom = ctx.createLinearGradient(0, h - 22, 0, h);
-  capBottom.addColorStop(0, 'rgba(255,255,255,0)');
-  capBottom.addColorStop(1, 'rgba(255,255,255,0.95)');
+  ctx.fillRect(0, 0, w, 46);
+  const capBottom = ctx.createLinearGradient(0, h - 46, 0, h);
+  capBottom.addColorStop(0, 'rgba(235,245,255,0)');
+  capBottom.addColorStop(1, 'rgba(235,245,255,0.97)');
   ctx.fillStyle = capBottom;
-  ctx.fillRect(0, h - 22, w, 22);
+  ctx.fillRect(0, h - 46, w, 46);
 
   const tex = new THREE.CanvasTexture(c);
   tex.wrapS = THREE.RepeatWrapping;
   tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
   return tex;
 }
 
@@ -1030,7 +1162,7 @@ function orbitalPower() {
 }
 
 function updateAim() {
-  if (gameOver || !player.alive) {
+  if (!gameReady || gameOver || !player.alive) {
     aimLine.visible = false;
     impactRing.visible = false;
     return;
@@ -1338,6 +1470,7 @@ function checkGameOver() {
   if (!player.alive || !enemiesAlive) {
     gameOver = true;
     audio.stopCharge();
+    audio.setMusicVolume(0.04);
     audio.end(player.alive);
     overlayTitle.textContent = player.alive ? 'VICTORY' : 'DEFEATED';
     overlayTitle.style.color = player.alive ? '#4ee281' : '#ff5f5f';
@@ -1403,11 +1536,20 @@ async function init() {
   buildRangeTable();
   buildEnemyBars();
 
+  // Show the main menu over a live (but paused) scene; gameplay starts on PLAY.
   document.getElementById('loading').classList.remove('show');
-  gameReady = true;
+  document.getElementById('mainMenu').classList.remove('hide');
   clock.getDelta();
   animate();
 }
+
+document.getElementById('playBtn').addEventListener('click', () => {
+  document.getElementById('mainMenu').classList.add('hide');
+  gameReady = true;
+  clock.getDelta(); // avoid a huge first-frame dt
+  audio.resume();
+  audio.startMusic();
+});
 
 function animate() {
   requestAnimationFrame(animate);
@@ -1416,7 +1558,7 @@ function animate() {
   if (playerFireCooldown > 0) playerFireCooldown -= dt;
   pollGamepad();
 
-  if (!gameOver) {
+  if (gameReady && !gameOver) {
     if (player.alive) {
       let moving = false;
       if (keys.w) { player.move(1, dt); moving = true; }

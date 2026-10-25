@@ -15,25 +15,26 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js';
 // back around to strike from the far side.
 const PLANET_RADIUS = 19;
 // Gravity is tuned so the *circular orbit* speed (v = sqrt(gravity * r)) at
-// muzzle altitude lands around the middle of the power bar — so a mid-charge
-// shot fired flat becomes a stable satellite. Weaker = sub-orbital (dips and
-// hits ground = short/direct shots); stronger = a high ellipse that arcs out
-// and comes back down (long bombardment). The orbit sweet-spot is marked on
-// the power bar.
+// muzzle altitude lands near the top of the power bar. Weaker = sub-orbital
+// (dips and hits the ground = short/direct shots); at full charge the shot is
+// a circular orbit that skims the surface and laps the planet. The fired speed
+// is CLAMPED to the circular-orbit speed (see orbitalPowerFor) so you can never
+// over-power a shot into a high arc that sails over everyone's heads — the
+// hardest shot always stays low enough to hit a tank anywhere on its lap.
 const GRAVITY = 90;
 const TANK_GROUND_CLEARANCE = 0.05;
 const TANK_HIT_RADIUS = 1.6;
 const TANK_BODY_RADIUS = 0.92;
 const TANK_MODEL_SIZE = 2.3;
-const TREE_MODEL_SIZE = 1.7;
-const TREE_COLLIDER_RADIUS = 0.72;
-const BARREL_MODEL_SIZE = 0.9;
-const BARREL_COLLIDER_RADIUS = 0.65;
+const TREE_MODEL_SIZE = 2.4;
+const TREE_COLLIDER_RADIUS = 0.85;
+const BARREL_MODEL_SIZE = 1.35;
+const BARREL_COLLIDER_RADIUS = 0.9;
 const MOVE_SPEED = 7.5;
 const TURN_SPEED = 2.5;
 const MIN_POWER = 22;
-const MAX_POWER = 65;
-const CHARGE_RATE = (MAX_POWER - MIN_POWER) / 1.1;
+const MAX_POWER = 44; // charge ceiling; actual fire is clamped to orbital speed
+const CHARGE_RATE = (MAX_POWER - MIN_POWER) / 1.0;
 const SPLASH_RADIUS = 3.5;
 const SPLASH_DAMAGE = 32;
 const DIRECT_DAMAGE = 24;
@@ -69,7 +70,7 @@ const ASSET_PATHS = {
 // ------------------------------- renderer -----------------------------------
 
 const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(68, window.innerWidth / window.innerHeight, 0.1, 2000);
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 2000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -877,12 +878,16 @@ function predictTrajectory(origin, dir, power) {
   return { points, impact };
 }
 
-// Launch speed that produces a circular orbit at the player's current muzzle
-// altitude: centripetal accel v^2/r must equal the (constant) gravity, so
-// v = sqrt(gravity * r). Used to mark the orbit sweet-spot on the power bar.
-function orbitalPower() {
-  const r = surfaceRadius(player.normal) + TANK_GROUND_CLEARANCE + MUZZLE_HEIGHT;
+// Launch speed that produces a circular orbit at a tank's muzzle altitude:
+// centripetal accel v^2/r must equal the (constant) gravity, so v = sqrt(g*r).
+// This is also the hard cap on fired speed — a circular orbit skims at the
+// launch altitude the whole way around, so it stays low enough to hit tanks.
+function orbitalPowerFor(tank) {
+  const r = surfaceRadius(tank.normal) + TANK_GROUND_CLEARANCE + MUZZLE_HEIGHT;
   return Math.sqrt(GRAVITY * r);
+}
+function orbitalPower() {
+  return orbitalPowerFor(player);
 }
 
 function updateAim() {
@@ -891,7 +896,7 @@ function updateAim() {
     impactRing.visible = false;
     return;
   }
-  const power = MIN_POWER + charge;
+  const power = Math.min(MIN_POWER + charge, orbitalPower());
   const { points, impact } = predictTrajectory(player.muzzleWorldPosition(), player.aimDirection(), power);
   const active = isCharging();
 
@@ -974,7 +979,8 @@ function isCharging() {
 // Release the charged shot (shared by keyboard, gamepad, and anything else).
 function tryFirePlayer() {
   if (!gameOver && player && player.alive && playerFireCooldown <= 0) {
-    fireTank(player, MIN_POWER + charge);
+    const power = Math.min(MIN_POWER + charge, orbitalPower());
+    fireTank(player, power);
     playerFireCooldown = FIRE_COOLDOWN;
   }
   charge = 0;
@@ -1070,15 +1076,16 @@ function updateAI(enemy, dt) {
     enemy.shotCooldown = 2.4 + Math.random() * 1.8;
     const angularDist = enemy.normal.angleTo(player.normal);
     const targetRange = angularDist * PLANET_RADIUS;
-    const power = THREE.MathUtils.clamp(powerForRange(targetRange) * (0.92 + Math.random() * 0.16), MIN_POWER, MAX_POWER);
+    // clamp to the enemy's own circular-orbit speed too, so AI shots also stay low
+    const power = THREE.MathUtils.clamp(powerForRange(targetRange) * (0.92 + Math.random() * 0.16), MIN_POWER, orbitalPowerFor(enemy));
     fireTank(enemy, power);
   }
 }
 
 // ------------------------------- camera -----------------------------------
 
-const CAM_DISTANCE = 9;
-const CAM_HEIGHT = 42;
+const CAM_DISTANCE = 7;
+const CAM_HEIGHT = 34;
 const camPos = new THREE.Vector3();
 const camTarget = new THREE.Vector3();
 let shakeTime = 0;
@@ -1107,7 +1114,9 @@ function updateCamera(dt) {
   camera.position.copy(camPos).add(shakeOffset);
   camera.up.copy(t.normal);
   // Bias the look-ahead toward the firing lane so the aim arc lies across the disc.
-  const lookAt = t.position.clone().add(t.forward.clone().multiplyScalar(6));
+  // Aim slightly behind the tank: in this near-top-down view that lifts the
+  // planet up the screen and leaves room above the tank for the aim arc.
+  const lookAt = t.position.clone().add(t.forward.clone().multiplyScalar(-4));
   camTarget.lerp(lookAt, Math.min(1, dt * 8));
   camera.lookAt(camTarget);
 }
